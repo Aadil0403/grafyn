@@ -23,12 +23,13 @@ type CatalogRepository interface {
 	GetTags(ctx context.Context) ([]model.Tag, error)
 }
 
-func createMySQLDatabase(config config.DatabaseConfiguration) (*gorm.DB, error) {
-	connectionString := fmt.Sprintf("%s:%s@tcp(%s)/%s?timeout=%ds&charset=utf8mb4&parseTime=True&loc=Local", config.User, config.Password, config.Endpoint, config.Name, config.ConnectTimeout)
+func createMySQLDatabase(config *config.DatabaseConfiguration) (*gorm.DB, error) {
+	connectionString := fmt.Sprintf("%s:%s@tcp(%s)/%s?timeout=%ds&charset=utf8mb4&parseTime=True&loc=Local", 
+		config.User, config.Password, config.Endpoint, config.Name, config.ConnectTimeout)
 	return gorm.Open(mysql.Open(connectionString), &gorm.Config{})
 }
 
-func NewRepository(config config.DatabaseConfiguration) (CatalogRepository, error) {
+func NewRepository(config *config.DatabaseConfiguration) (CatalogRepository, error) {
 	var db *gorm.DB
 	var err error
 
@@ -51,7 +52,9 @@ func NewRepository(config config.DatabaseConfiguration) (CatalogRepository, erro
 	fmt.Println("Running database migration...")
 
 	// Migrate the schema
-	db.AutoMigrate(&model.Product{})
+	if err := db.AutoMigrate(&model.Product{}); err != nil {
+		return nil, err
+	}
 
 	fmt.Println("Database migration complete")
 

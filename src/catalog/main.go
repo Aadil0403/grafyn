@@ -115,7 +115,9 @@ func main() {
 
 	r.GET("/health", func(c *gin.Context) {
 		if !chaosController.IsHealthy() {
-			c.AbortWithError(503, fmt.Errorf("health check failed"))
+			if err := c.AbortWithError(503, fmt.Errorf("health check failed")); err != nil {
+			log.Printf("Error aborting request: %v", err)
+		}
 			return
 		}
 
@@ -136,8 +138,9 @@ func main() {
 	})
 
 	srv := &http.Server{
-		Addr:    ":" + strconv.Itoa(config.Port),
-		Handler: r,
+		Addr:              ":" + strconv.Itoa(config.Port),
+		Handler:           r,
+		ReadHeaderTimeout: 30 * time.Second,
 	}
 
 	// Initializing the server in a goroutine so that
