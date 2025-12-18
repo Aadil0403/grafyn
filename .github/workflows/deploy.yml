@@ -70,10 +70,128 @@ jobs:
           echo "📊 Services to build: ${CHANGED_SERVICES[*]}"
           echo "📊 Generated matrix: {\"service\":$MATRIX_JSON}"
 
+  lint-and-test:
+    name: Lint & Test ${{ matrix.service }}
+    runs-on: ubuntu-latest
+    needs: detect-changes
+    if: needs.detect-changes.outputs.has-changes == 'true'
+    strategy:
+      matrix: ${{ fromJson(needs.detect-changes.outputs.matrix) }}
+      fail-fast: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Java (for Java services)
+        if: matrix.service == 'ui' || matrix.service == 'cart' || matrix.service == 'orders'
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'corretto'
+          java-version: '21'
+
+      - name: Setup Go (for Go services)
+        if: matrix.service == 'catalog'
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+
+      - name: Setup Node.js (for Node.js services)
+        if: matrix.service == 'checkout'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+          cache-dependency-path: src/${{ matrix.service }}/package-lock.json
+
+      # Java Services Linting & Testing
+      - name: Java - Lint and Test ${{ matrix.service }}
+        if: matrix.service == 'ui' || matrix.service == 'cart' || matrix.service == 'orders'
+        run: |
+          cd src/${{ matrix.service }}
+          echo "🔍 Running Java linting and tests for ${{ matrix.service }}"
+          
+          # Run Maven clean and compile
+          ./mvnw clean compile
+          
+          # Run tests
+          ./mvnw test
+          
+          # Run SpotBugs for static analysis
+          ./mvnw spotbugs:check || echo "⚠️ SpotBugs warnings found"
+          
+          # Run Checkstyle for code style
+          ./mvnw checkstyle:check || echo "⚠️ Checkstyle warnings found"
+
+      # Go Service Linting & Testing
+      - name: Go - Lint and Test ${{ matrix.service }}
+        if: matrix.service == 'catalog'
+        run: |
+          cd src/${{ matrix.service }}
+          echo "🔍 Running Go linting and tests for ${{ matrix.service }}"
+          
+          # Install dependencies
+          go mod download
+          
+          # Run go vet
+          go vet ./...
+          
+          # Install and run golangci-lint
+          go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
+          golangci-lint run ./...
+          
+          # Run tests with coverage
+          go test -v -race -coverprofile=coverage.out ./...
+          go tool cover -html=coverage.out -o coverage.html
+
+      # Node.js Service Linting & Testing
+      - name: Node.js - Lint and Test ${{ matrix.service }}
+        if: matrix.service == 'checkout'
+        run: |
+          cd src/${{ matrix.service }}
+          echo "🔍 Running Node.js linting and tests for ${{ matrix.service }}"
+          
+          # Install dependencies
+          npm ci
+          
+          # Run ESLint
+          npm run lint || echo "⚠️ ESLint warnings found"
+          
+          # Run tests
+          npm test
+          
+          # Run security audit
+          npm audit --audit-level moderate
+
+      # Security Scanning
+      - name: Security Scan - ${{ matrix.service }}
+        run: |
+          echo "🔒 Running security scan for ${{ matrix.service }}"
+          
+          # Install Trivy for vulnerability scanning
+          sudo apt-get update
+          sudo apt-get install wget apt-transport-https gnupg lsb-release
+          wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
+          echo "deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" | sudo tee -a /etc/apt/sources.list.d/trivy.list
+          sudo apt-get update
+          sudo apt-get install trivy
+          
+          # Scan filesystem for vulnerabilities
+          trivy fs --exit-code 0 --severity HIGH,CRITICAL src/${{ matrix.service }}/
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-${{ matrix.service }}
+          path: |
+            src/${{ matrix.service }}/target/surefire-reports/
+            src/${{ matrix.service }}/coverage.html
+            src/${{ matrix.service }}/coverage.out
+          retention-days: 30
+
   deploy:
     name: Deploy ${{ matrix.service }}
     runs-on: ubuntu-latest
-    needs: detect-changes
+    needs: [detect-changes, lint-and-test]
     if: needs.detect-changes.outputs.has-changes == 'true'
     permissions:
       contents: write
@@ -116,6 +234,25 @@ jobs:
           
           echo "✅ Pushed ${ECR_REPO}:${TAG}"
           echo "ECR_REPO=${ECR_REPO}" >> $GITHUB_ENV
+
+      - name: Scan Docker image for vulnerabilities
+        run: |
+          SERVICE="${{ matrix.service }}"
+          TAG="$(echo ${{ github.sha }} | cut -c1-7)"
+          ECR_REPO="${{ env.ECR_REPO }}"
+          
+          echo "🔒 Scanning Docker image for vulnerabilities"
+          
+          # Install Trivy
+          sudo apt-get update
+          sudo apt-get install wget apt-transport-https gnupg lsb-release
+          wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
+          echo "deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" | sudo tee -a /etc/apt/sources.list.d/trivy.list
+          sudo apt-get update
+          sudo apt-get install trivy
+          
+          # Scan the built image
+          trivy image --exit-code 0 --severity HIGH,CRITICAL "${ECR_REPO}:${TAG}"
 
       - name: Update Helm values for ${{ matrix.service }}
         run: |
@@ -210,7 +347,7 @@ jobs:
   summary:
     name: Deployment Summary
     runs-on: ubuntu-latest
-    needs: [detect-changes, deploy]
+    needs: [detect-changes, lint-and-test, deploy]
     if: always()
     steps:
       - name: Create deployment summary
@@ -226,16 +363,27 @@ jobs:
             echo "**Changed Services:** ${{ needs.detect-changes.outputs.changed-services }}" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
             
+            # Quality Gates Status
+            echo "### 🔍 Quality Gates" >> $GITHUB_STEP_SUMMARY
+            if [ "${{ needs.lint-and-test.result }}" == "success" ]; then
+              echo "✅ **Linting & Testing:** Passed" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "❌ **Linting & Testing:** Failed" >> $GITHUB_STEP_SUMMARY
+            fi
+            
             if [ "${{ needs.deploy.result }}" == "success" ]; then
-              echo "✅ **Status:** Deployment successful" >> $GITHUB_STEP_SUMMARY
+              echo "✅ **Deployment:** Successful" >> $GITHUB_STEP_SUMMARY
               echo "" >> $GITHUB_STEP_SUMMARY
               echo "**Actions completed:**" >> $GITHUB_STEP_SUMMARY
+              echo "- 🔍 Code linting and quality checks" >> $GITHUB_STEP_SUMMARY
+              echo "- 🧪 Unit tests execution" >> $GITHUB_STEP_SUMMARY
+              echo "- 🔒 Security vulnerability scanning" >> $GITHUB_STEP_SUMMARY
               echo "- 🔨 Built and pushed Docker images to ECR" >> $GITHUB_STEP_SUMMARY
               echo "- 📝 Updated Helm chart values" >> $GITHUB_STEP_SUMMARY
               echo "- 💾 Committed changes to repository" >> $GITHUB_STEP_SUMMARY
               echo "- 🔄 ArgoCD will sync automatically" >> $GITHUB_STEP_SUMMARY
             else
-              echo "❌ **Status:** Deployment failed" >> $GITHUB_STEP_SUMMARY
+              echo "❌ **Deployment:** Failed" >> $GITHUB_STEP_SUMMARY
               echo "Check the workflow logs for details" >> $GITHUB_STEP_SUMMARY
             fi
           else
