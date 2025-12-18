@@ -75,7 +75,7 @@ func main() {
 		log.Fatal(err)
 	}
 
-	db, err := repository.NewRepository(config.Database)
+	db, err := repository.NewRepository(&config.Database)
 	if err != nil {
 		log.Fatal(err)
 	}

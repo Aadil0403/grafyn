@@ -65,7 +65,7 @@ func TestMain(m *testing.M) {
 func router() *gin.Engine {
 	router := gin.Default()
 
-	db, err := repository.NewRepository(dbConfig)
+	db, err := repository.NewRepository(&dbConfig)
 	if err != nil {
 		log.Fatal(err)
 	}
